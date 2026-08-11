@@ -1,65 +1,143 @@
 #!/usr/bin/env bash
 
-set -e
+set -euo pipefail
 
 # ============================================================
-# Git Production Deployment
+# git-production-deploy
+#
+# Safely deploy the current main/master branch to production
+# through a GitHub Pull Request.
 #
 # Usage:
 #
 #   git prod
 #   git prod --dry-run
+#   git prod --production-branch production
 #
-# Flow:
+# Requirements:
 #
-#   master/main
-#       ↓
-#   Pull Request → prod
-#       ↓
-#   Wait for GitHub Actions / Checks
-#       ↓
-#   Verify checks
-#       ↓
-#   Re-check prod
-#       ↓
-#   Final confirmation
-#       ↓
-#   Merge PR
-#       ↓
-#   Existing DevOps / CD
-#       ↓
-#   Production
+#   Git
+#   GitHub CLI (gh)
 # ============================================================
 
 
+# ============================================================
+# Configuration
+# ============================================================
+
+PRODUCTION_BRANCH="prod"
 DRY_RUN=false
 
-if [ "$1" = "--dry-run" ]; then
-    DRY_RUN=true
-fi
+
+# ============================================================
+# Parse arguments
+# ============================================================
+
+while [ $# -gt 0 ]; do
+
+    case "$1" in
+
+        --dry-run)
+            DRY_RUN=true
+            shift
+            ;;
+
+        --production-branch)
+            if [ -z "${2:-}" ]; then
+                echo "❌ Missing production branch name."
+                exit 1
+            fi
+
+            PRODUCTION_BRANCH="$2"
+            shift 2
+            ;;
+
+        --production-branch=*)
+            PRODUCTION_BRANCH="${1#*=}"
+            shift
+            ;;
+
+        --help|-h)
+
+            cat <<EOF
+
+git-production-deploy
+
+Safely deploy the current main/master branch to production
+through a GitHub Pull Request.
+
+Usage:
+
+    git prod
+    git prod --dry-run
+    git prod --production-branch production
+
+Options:
+
+    --dry-run
+        Show what would happen without creating or merging
+        a Pull Request.
+
+    --production-branch <branch>
+        Set the production branch.
+
+        Default:
+            prod
+
+Examples:
+
+    git prod
+
+    git prod --dry-run
+
+    git prod --production-branch production
+
+EOF
+
+            exit 0
+            ;;
+
+        *)
+            echo "❌ Unknown option: $1"
+            echo "Run 'git prod --help' for usage."
+            exit 1
+            ;;
+
+    esac
+
+done
 
 
 # ============================================================
-# Helpers
+# Helper functions
 # ============================================================
 
 error() {
+
     echo
     echo "❌ $1"
+    echo
+
     exit 1
 }
 
-info() {
-    echo "ℹ️  $1"
-}
 
 success() {
+
     echo "✓ $1"
+
+}
+
+
+info() {
+
+    echo "ℹ️  $1"
+
 }
 
 
 # ============================================================
-# 1. Validate Git repository
+# 1. Verify Git repository
 # ============================================================
 
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
@@ -67,22 +145,63 @@ git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
 
 
 # ============================================================
-# 2. Detect current branch
+# 2. Verify GitHub CLI
+# ============================================================
+
+command -v gh >/dev/null 2>&1 \
+    || error "GitHub CLI (gh) is not installed.
+
+Install:
+https://cli.github.com/
+
+Then authenticate:
+gh auth login"
+
+
+# ============================================================
+# 3. Verify GitHub authentication
+# ============================================================
+
+gh auth status >/dev/null 2>&1 \
+    || error "GitHub CLI is not authenticated.
+
+Run:
+gh auth login"
+
+
+# ============================================================
+# 4. Detect current branch
 # ============================================================
 
 CURRENT_BRANCH=$(git branch --show-current)
 
-if [ "$CURRENT_BRANCH" != "main" ] && [ "$CURRENT_BRANCH" != "master" ]; then
-    error "Production deployment is only allowed from main or master.
+if [ -z "$CURRENT_BRANCH" ]; then
 
-Current branch: $CURRENT_BRANCH"
+    error "Could not determine the current Git branch."
+
 fi
-
-DEPLOY_BRANCH="$CURRENT_BRANCH"
 
 
 # ============================================================
-# 3. Working tree must be clean
+# 5. Only allow main/master as deployment source
+# ============================================================
+
+if [ "$CURRENT_BRANCH" != "main" ] && \
+   [ "$CURRENT_BRANCH" != "master" ]; then
+
+    error "Production deployment must start from main or master.
+
+Current branch:
+$CURRENT_BRANCH"
+
+fi
+
+
+SOURCE_BRANCH="$CURRENT_BRANCH"
+
+
+# ============================================================
+# 6. Verify working tree
 # ============================================================
 
 if [ -n "$(git status --porcelain)" ]; then
@@ -95,21 +214,25 @@ if [ -n "$(git status --porcelain)" ]; then
     git status --short
 
     exit 1
+
 fi
 
 
 # ============================================================
-# 4. Get GitHub repository
+# 7. Detect repository
 # ============================================================
 
-REPOSITORY=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
+REPOSITORY=$(gh repo view \
+    --json nameWithOwner \
+    --jq '.nameWithOwner')
+
 
 [ -n "$REPOSITORY" ] \
-    || error "Could not determine GitHub repository."
+    || error "Could not determine the GitHub repository."
 
 
 # ============================================================
-# 5. Header
+# 8. Header
 # ============================================================
 
 echo
@@ -117,70 +240,81 @@ echo "========================================"
 echo "       Production Deployment"
 echo "========================================"
 echo
+
 echo "Repository: $REPOSITORY"
-echo "Branch:     $DEPLOY_BRANCH → prod"
+echo "Branch:     $SOURCE_BRANCH → $PRODUCTION_BRANCH"
 
 if [ "$DRY_RUN" = true ]; then
+
     echo "Mode:       DRY RUN (no changes will be made)"
+
 fi
 
 echo
 
 
 # ============================================================
-# 6. Fetch latest remote branches
+# 9. Fetch latest branches
 # ============================================================
 
-echo "🔄 Fetching latest $DEPLOY_BRANCH and prod..."
+echo "🔄 Fetching latest $SOURCE_BRANCH and $PRODUCTION_BRANCH..."
 
-git fetch origin "$DEPLOY_BRANCH" prod
+git fetch origin \
+    "$SOURCE_BRANCH" \
+    "$PRODUCTION_BRANCH"
 
 success "Remote branches updated."
 
 
 # ============================================================
-# 7. Local branch must match origin
+# 10. Verify local source branch
 # ============================================================
 
 LOCAL_SHA=$(git rev-parse HEAD)
-REMOTE_SHA=$(git rev-parse "origin/$DEPLOY_BRANCH")
 
-if [ "$LOCAL_SHA" != "$REMOTE_SHA" ]; then
+REMOTE_SOURCE_SHA=$(git rev-parse \
+    "origin/$SOURCE_BRANCH")
 
-    error "Local $DEPLOY_BRANCH does not match origin/$DEPLOY_BRANCH.
 
-Local :  $LOCAL_SHA
-Remote: $REMOTE_SHA
+if [ "$LOCAL_SHA" != "$REMOTE_SOURCE_SHA" ]; then
 
-Please push/pull the latest changes first."
+    error "Local $SOURCE_BRANCH does not match origin/$SOURCE_BRANCH.
+
+Local:
+$LOCAL_SHA
+
+Remote:
+$REMOTE_SOURCE_SHA
+
+Push or pull the latest changes first."
 
 fi
 
-success "Local $DEPLOY_BRANCH matches origin/$DEPLOY_BRANCH."
+
+success "Local $SOURCE_BRANCH matches origin/$SOURCE_BRANCH."
 
 
 # ============================================================
-# 8. Check whether there is anything to deploy
-#
-# We compare the actual file content.
-# This avoids relying only on Git ancestry because prod
-# may contain merge commits.
+# 11. Check differences
 # ============================================================
 
-if git diff --quiet "origin/prod..origin/$DEPLOY_BRANCH"; then
+if git diff --quiet \
+    "origin/$PRODUCTION_BRANCH..origin/$SOURCE_BRANCH"; then
 
     echo
-    info "No file differences between $DEPLOY_BRANCH and prod."
+    info "No file differences between $SOURCE_BRANCH and $PRODUCTION_BRANCH."
     echo "Nothing to deploy."
 
     exit 0
+
 fi
 
-success "Changes detected between $DEPLOY_BRANCH and prod."
+
+success "Changes detected between $SOURCE_BRANCH and $PRODUCTION_BRANCH."
 
 
 # ============================================================
-# 9. Dry run
+# 12. Dry run
 # ============================================================
 
 if [ "$DRY_RUN" = true ]; then
@@ -192,14 +326,14 @@ if [ "$DRY_RUN" = true ]; then
     echo
 
     echo "Deployment:"
-    echo "$DEPLOY_BRANCH → prod"
+    echo "$SOURCE_BRANCH → $PRODUCTION_BRANCH"
     echo
 
     echo "The following WOULD happen:"
     echo
 
     echo "  1. Create/find Pull Request"
-    echo "     $DEPLOY_BRANCH → prod"
+    echo "     $SOURCE_BRANCH → $PRODUCTION_BRANCH"
     echo
 
     echo "  2. Wait for GitHub Actions / Checks"
@@ -208,13 +342,19 @@ if [ "$DRY_RUN" = true ]; then
     echo "  3. Verify all checks succeeded"
     echo
 
-    echo "  4. Re-check prod before merge"
+    echo "  4. Re-check production branch"
     echo
 
-    echo "  5. Merge the Pull Request"
+    echo "  5. Verify Pull Request integrity"
     echo
 
-    echo "  6. Existing DevOps/CD handles Production"
+    echo "  6. Ask for final merge confirmation"
+    echo
+
+    echo "  7. Merge Pull Request"
+    echo
+
+    echo "  8. Existing DevOps/CD handles production"
     echo
 
     echo "✓ No Pull Request was created."
@@ -223,18 +363,22 @@ if [ "$DRY_RUN" = true ]; then
     echo
 
     exit 0
+
 fi
 
 
 # ============================================================
-# 10. Production confirmation
+# 13. First confirmation
 # ============================================================
 
 echo
-echo "⚠️  You are about to deploy ${DEPLOY_BRANCH^^} to PRODUCTION."
+echo "⚠️  You are about to deploy ${SOURCE_BRANCH^^} to PRODUCTION."
+echo
+
 printf "Continue? [y/N]: "
 
-read ANSWER
+read -r ANSWER
+
 
 case "$ANSWER" in
 
@@ -249,77 +393,85 @@ case "$ANSWER" in
 
 esac
 
+
+# ============================================================
+# 14. Re-fetch after confirmation
+# ============================================================
+
 echo
-
-
-# ============================================================
-# 11. Re-fetch after confirmation
-# ============================================================
-
 echo "🔄 Re-checking remote state before deployment..."
 
-git fetch origin "$DEPLOY_BRANCH" prod
+git fetch origin \
+    "$SOURCE_BRANCH" \
+    "$PRODUCTION_BRANCH"
 
-LATEST_REMOTE_SHA=$(git rev-parse "origin/$DEPLOY_BRANCH")
 
-if [ "$LATEST_REMOTE_SHA" != "$REMOTE_SHA" ]; then
+LATEST_SOURCE_SHA=$(git rev-parse \
+    "origin/$SOURCE_BRANCH")
 
-    error "The $DEPLOY_BRANCH branch changed while waiting for confirmation.
 
-Please run git prod again."
+if [ "$LATEST_SOURCE_SHA" != "$REMOTE_SOURCE_SHA" ]; then
+
+    error "The $SOURCE_BRANCH branch changed after confirmation.
+
+Please run:
+git prod
+
+again."
 
 fi
 
-success "Remote $DEPLOY_BRANCH has not changed."
+
+success "Remote $SOURCE_BRANCH has not changed."
 
 
 # ============================================================
-# 12. Save current production SHA
-#
-# We will use this later to make sure that another developer
-# did not change prod while our CI was running.
+# 15. Save production SHA
 # ============================================================
 
-PROD_SHA_BEFORE=$(git rev-parse "origin/prod")
+PRODUCTION_SHA_BEFORE=$(git rev-parse \
+    "origin/$PRODUCTION_BRANCH")
 
 
 # ============================================================
-# 13. Find existing Pull Request
+# 16. Find existing PR
 # ============================================================
 
 echo
 echo "🔍 Checking for existing Pull Request..."
 
+
 PR_NUMBER=$(gh pr list \
     --repo "$REPOSITORY" \
-    --base prod \
-    --head "$DEPLOY_BRANCH" \
+    --base "$PRODUCTION_BRANCH" \
+    --head "$SOURCE_BRANCH" \
     --state open \
     --json number \
     --jq '.[0].number')
 
 
 # ============================================================
-# 14. Create PR if it doesn't exist
+# 17. Create PR if necessary
 # ============================================================
 
 if [ -z "$PR_NUMBER" ]; then
 
     echo
     echo "➕ Creating Pull Request..."
-    echo "$DEPLOY_BRANCH → prod"
+    echo "$SOURCE_BRANCH → $PRODUCTION_BRANCH"
 
     PR_URL=$(gh pr create \
         --repo "$REPOSITORY" \
-        --base prod \
-        --head "$DEPLOY_BRANCH" \
-        --title "Deploy $DEPLOY_BRANCH to production" \
-        --body "Automated production deployment from $DEPLOY_BRANCH.")
+        --base "$PRODUCTION_BRANCH" \
+        --head "$SOURCE_BRANCH" \
+        --title "Deploy $SOURCE_BRANCH to $PRODUCTION_BRANCH" \
+        --body "Automated production deployment from $SOURCE_BRANCH to $PRODUCTION_BRANCH.")
 
     PR_NUMBER=$(gh pr view "$PR_URL" \
         --repo "$REPOSITORY" \
         --json number \
         --jq '.number')
+
 
     success "Pull Request #$PR_NUMBER created."
 
@@ -335,7 +487,7 @@ echo "Pull Request: #$PR_NUMBER"
 
 
 # ============================================================
-# 15. Get PR HEAD SHA
+# 18. Save PR HEAD SHA
 # ============================================================
 
 PR_HEAD_SHA=$(gh pr view "$PR_NUMBER" \
@@ -343,27 +495,13 @@ PR_HEAD_SHA=$(gh pr view "$PR_NUMBER" \
     --json headRefOid \
     --jq '.headRefOid')
 
+
 [ -n "$PR_HEAD_SHA" ] \
-    || error "Could not determine Pull Request HEAD commit."
+    || error "Could not determine Pull Request HEAD."
 
 
 # ============================================================
-# 16. Wait for GitHub Actions / Checks
-#
-# IMPORTANT:
-#
-# Immediately after creating a PR, GitHub Actions may not have
-# registered the checks yet.
-#
-# Therefore:
-#
-#   no checks
-#       ↓
-#   wait
-#       ↓
-#   check again
-#
-# We do NOT treat "no checks reported" as a failure.
+# 19. Wait for checks to appear
 # ============================================================
 
 echo
@@ -379,10 +517,8 @@ echo
 
 
 CHECKS_FOUND=false
-CHECK_ATTEMPTS=0
 
-# Maximum wait for checks to appear:
-# 60 attempts × 10 seconds = 10 minutes.
+CHECK_ATTEMPTS=0
 
 MAX_CHECK_ATTEMPTS=60
 
@@ -391,15 +527,13 @@ while [ "$CHECKS_FOUND" = false ]; do
 
     CHECK_ATTEMPTS=$((CHECK_ATTEMPTS + 1))
 
+
     CHECK_OUTPUT=$(gh pr checks "$PR_NUMBER" \
         --repo "$REPOSITORY" 2>&1 || true)
 
 
-    # --------------------------------------------------------
-    # Checks have appeared
-    # --------------------------------------------------------
-
-    if ! echo "$CHECK_OUTPUT" | grep -qi "no checks reported"; then
+    if ! echo "$CHECK_OUTPUT" \
+        | grep -qi "no checks reported"; then
 
         CHECKS_FOUND=true
         break
@@ -407,38 +541,19 @@ while [ "$CHECKS_FOUND" = false ]; do
     fi
 
 
-    # --------------------------------------------------------
-    # Timeout
-    # --------------------------------------------------------
-
     if [ "$CHECK_ATTEMPTS" -ge "$MAX_CHECK_ATTEMPTS" ]; then
 
-        echo
-        echo "========================================"
-        echo "       Production Deployment STOPPED"
-        echo "========================================"
-        echo
+        error "No GitHub checks appeared within 10 minutes.
 
-        echo "❌ No GitHub checks appeared within"
-        echo "   the expected waiting period."
-        echo
-
-        echo "Pull Request: #$PR_NUMBER"
-        echo
-
-        echo "Please check the Pull Request on GitHub."
-
-        exit 1
+Please check Pull Request #$PR_NUMBER on GitHub."
 
     fi
 
 
-    # --------------------------------------------------------
-    # Wait
-    # --------------------------------------------------------
+    printf "Checks not available yet... waiting 10s (%s/%s)\r" \
+        "$CHECK_ATTEMPTS" \
+        "$MAX_CHECK_ATTEMPTS"
 
-    printf "   Checks not available yet... waiting 10s (%s/%s)\r" \
-        "$CHECK_ATTEMPTS" "$MAX_CHECK_ATTEMPTS"
 
     sleep 10
 
@@ -446,14 +561,14 @@ done
 
 
 echo
-echo "✓ GitHub checks detected."
+success "GitHub checks detected."
+
+
+# ============================================================
+# 20. Wait for all checks
+# ============================================================
+
 echo
-
-
-# ============================================================
-# 17. Wait until all checks finish
-# ============================================================
-
 echo "⏳ Waiting for all checks to complete..."
 echo
 
@@ -491,52 +606,30 @@ success "All GitHub checks completed successfully."
 
 
 # ============================================================
-# 18. Re-fetch production after CI
-#
-# Another developer may have merged something into prod
-# while our CI was running.
+# 21. Re-fetch production
 # ============================================================
 
 echo
 echo "🔄 Re-checking production branch..."
 
-git fetch origin prod
-
-PROD_SHA_AFTER=$(git rev-parse "origin/prod")
+git fetch origin "$PRODUCTION_BRANCH"
 
 
-if [ "$PROD_SHA_AFTER" != "$PROD_SHA_BEFORE" ]; then
+PRODUCTION_SHA_AFTER=$(git rev-parse \
+    "origin/$PRODUCTION_BRANCH")
 
-    echo
-    echo "========================================"
-    echo "       Production Changed"
-    echo "========================================"
-    echo
 
-    echo "⚠️  Another Pull Request was merged into prod"
-    echo "while your deployment was being validated."
-    echo
+if [ "$PRODUCTION_SHA_AFTER" != "$PRODUCTION_SHA_BEFORE" ]; then
 
-    echo "Previous prod:"
-    echo "  $PROD_SHA_BEFORE"
-    echo
+    error "Another Pull Request was merged into $PRODUCTION_BRANCH
+while your CI was running.
 
-    echo "Current prod:"
-    echo "  $PROD_SHA_AFTER"
-    echo
+Production changed.
 
-    echo "Production deployment has been stopped for safety."
-    echo
+Run:
+git prod
 
-    echo "Please run:"
-    echo
-    echo "    git prod"
-    echo
-
-    echo "again so GitHub can validate your deployment"
-    echo "against the latest production state."
-
-    exit 1
+again so the deployment can be revalidated."
 
 fi
 
@@ -545,7 +638,7 @@ success "Production branch has not changed."
 
 
 # ============================================================
-# 19. Re-check PR state
+# 22. Re-check PR state
 # ============================================================
 
 echo
@@ -562,13 +655,14 @@ if [ "$PR_STATE" != "OPEN" ]; then
 
     error "Pull Request #$PR_NUMBER is no longer open.
 
-Current state: $PR_STATE"
+Current state:
+$PR_STATE"
 
 fi
 
 
 # ============================================================
-# 20. Verify PR HEAD did not change
+# 23. Verify PR HEAD
 # ============================================================
 
 CURRENT_PR_HEAD_SHA=$(gh pr view "$PR_NUMBER" \
@@ -579,9 +673,9 @@ CURRENT_PR_HEAD_SHA=$(gh pr view "$PR_NUMBER" \
 
 if [ "$CURRENT_PR_HEAD_SHA" != "$PR_HEAD_SHA" ]; then
 
-    error "Pull Request HEAD changed while deployment was running.
+    error "Pull Request HEAD changed while CI was running.
 
-The Pull Request must be revalidated before merging."
+The Pull Request must be revalidated."
 
 fi
 
@@ -590,7 +684,7 @@ success "Pull Request HEAD is unchanged."
 
 
 # ============================================================
-# 21. Check PR mergeability
+# 24. Check mergeability
 # ============================================================
 
 MERGEABLE=$(gh pr view "$PR_NUMBER" \
@@ -610,15 +704,11 @@ echo "Mergeable:   $MERGEABLE"
 echo "Merge state: $MERGE_STATE"
 
 
-# ============================================================
-# 22. Handle conflicts
-# ============================================================
-
 if [ "$MERGEABLE" = "CONFLICTING" ]; then
 
     error "Pull Request has merge conflicts.
 
-Resolve the conflicts manually before deploying."
+Resolve them manually before deploying."
 
 fi
 
@@ -627,21 +717,16 @@ if [ "$MERGEABLE" = "UNKNOWN" ]; then
 
     error "GitHub could not determine whether the Pull Request is mergeable.
 
-Please check Pull Request #$PR_NUMBER on GitHub."
+Check Pull Request #$PR_NUMBER on GitHub."
 
 fi
 
 
-# ============================================================
-# 23. Handle PR behind prod
-# ============================================================
-
 if [ "$MERGE_STATE" = "BEHIND" ]; then
 
-    error "Pull Request is behind prod.
+    error "Pull Request is behind $PRODUCTION_BRANCH.
 
-Another change may have reached production.
-Please update/revalidate the Pull Request before running git prod again."
+Please update and revalidate the Pull Request."
 
 fi
 
@@ -650,7 +735,7 @@ success "Pull Request is ready to merge."
 
 
 # ============================================================
-# 24. Final confirmation
+# 25. Final confirmation
 # ============================================================
 
 echo
@@ -660,7 +745,7 @@ echo "========================================"
 echo
 
 echo "Pull Request: #$PR_NUMBER"
-echo "Deployment:    $DEPLOY_BRANCH → prod"
+echo "Deployment:   $SOURCE_BRANCH → $PRODUCTION_BRANCH"
 echo
 
 echo "✓ GitHub checks passed"
@@ -670,10 +755,11 @@ echo "✓ Pull Request is mergeable"
 echo
 
 
-printf "Merge Pull Request into PROD? [y/N]: "
+printf "Merge Pull Request into %s? [y/N]: " \
+    "$PRODUCTION_BRANCH"
 
 
-read MERGE_ANSWER
+read -r MERGE_ANSWER
 
 
 case "$MERGE_ANSWER" in
@@ -685,18 +771,18 @@ case "$MERGE_ANSWER" in
         echo
         echo "✗ Merge cancelled."
         echo
+
         echo "The Pull Request remains open:"
         echo "https://github.com/$REPOSITORY/pull/$PR_NUMBER"
 
         exit 0
-
         ;;
 
 esac
 
 
 # ============================================================
-# 25. Final merge
+# 26. Final merge
 # ============================================================
 
 echo
@@ -712,7 +798,7 @@ gh pr merge "$PR_NUMBER" \
 
 
 # ============================================================
-# 26. Done
+# 27. Done
 # ============================================================
 
 echo
@@ -722,7 +808,7 @@ echo "========================================"
 echo
 
 echo "✓ Pull Request #$PR_NUMBER merged."
-echo "✓ $DEPLOY_BRANCH → prod"
+echo "✓ $SOURCE_BRANCH → $PRODUCTION_BRANCH"
 echo
 
 echo "✓ Existing DevOps/CD pipeline will now"
@@ -731,4 +817,3 @@ echo
 
 echo "========================================"
 echo
-
